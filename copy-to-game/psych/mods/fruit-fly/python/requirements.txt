@@ -1,0 +1,4 @@
+numpy
+opencv-python
+# Optional on Linux/macOS if you want Python to tap WASD/arrows itself:
+# pynput

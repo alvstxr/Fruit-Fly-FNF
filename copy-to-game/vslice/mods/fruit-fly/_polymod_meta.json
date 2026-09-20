@@ -1,0 +1,9 @@
+{
+  "id": "fruit-fly",
+  "title": "Fruit Fly",
+  "description": "Python Fly brain window plays FNF from the Janelia male-cns circuit. Needs Python 3 + numpy + opencv-python.",
+  "contributors": [{ "name": "Fruit Fly FNF contributors" }],
+  "api_version": "0.8.0",
+  "mod_version": "0.6.4",
+  "license": "MIT"
+}

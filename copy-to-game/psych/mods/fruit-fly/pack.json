@@ -1,0 +1,7 @@
+{
+  "name": "Fruit Fly",
+  "description": "Python Fly brain window plays FNF from the male-cns circuit. Enable as a global mod. Botplay off. Needs Python + opencv.",
+  "restart": false,
+  "runsGlobally": true,
+  "color": [192, 112, 200]
+}
