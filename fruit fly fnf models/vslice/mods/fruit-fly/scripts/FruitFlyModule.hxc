@@ -1,0 +1,950 @@
+import flixel.FlxG;
+import funkin.modding.module.Module;
+import funkin.play.PlayState;
+import funkin.Conductor;
+import funkin.util.FileUtil;
+import funkin.Highscore;
+
+class FruitFlyModule extends Module {
+	var TICK:Float = 0.016;
+	var IDLE_TICK:Float = 0.25;
+	var SPAWN_GAP:Float = 2.0;
+
+	var clock:Float = 0;
+	var pressClock:Float = 0;
+	var spawnClock:Float = 99;
+	var seq:Int = 0;
+	var rating:String = "";
+	var etas:Array<Dynamic> = [null, null, null, null];
+	var due:Array<Bool> = [false, false, false, false];
+	var sustain:Array<Bool> = [false, false, false, false];
+	var bits:Array<Bool> = [false, false, false, false];
+	var prev:Array<Bool> = [false, false, false, false];
+	var wanted:Array<Bool> = [false, false, false, false];
+	var wasBits:Array<Bool> = [false, false, false, false];
+	var wantedAt:Array<Float> = [-9999.0, -9999.0, -9999.0, -9999.0];
+	var lastHitT:Array<Float> = [-9999.0, -9999.0, -9999.0, -9999.0];
+	var holdUntil:Array<Float> = [0.0, 0.0, 0.0, 0.0];
+	var incoming:Array<Dynamic> = [];
+	var brainAlive:Bool = false;
+	var spawned:Bool = false;
+	var lastPress:String = "";
+	var tmpSense:String = "";
+	var tmpPress:String = "";
+	var funkSense:String = "";
+	var funkPress:String = "";
+	var localSense:String = "mods/fruit-fly/python/fly_fnf_sense.txt";
+	var localPress:String = "mods/fruit-fly/python/fly_fnf_press.txt";
+
+	public function new(?moduleId:String) {
+		super(moduleId == null ? "FruitFlyModule" : moduleId, 50);
+		try {
+			var t = Sys.getEnv("TEMP");
+			if (t == null || t == "")
+				t = Sys.getEnv("TMP");
+			if (t != null && t != "") {
+				tmpSense = t + "/fly_fnf_sense.txt";
+				tmpPress = t + "/fly_fnf_press.txt";
+				funkSense = t + "/funkin/fly_fnf_sense.txt";
+				funkPress = t + "/funkin/fly_fnf_press.txt";
+				try {
+					sys.FileSystem.createDirectory(t + "/funkin");
+				} catch (e:Dynamic) {}
+			}
+		} catch (e:Dynamic) {}
+	}
+
+	public override function onCreate(event:Dynamic):Void {
+		try {
+			if (FlxG.autoPause)
+				FlxG.autoPause = false;
+		} catch (e:Dynamic) {}
+	}
+
+	public override function onSongStart(event:Dynamic):Void {
+		trySpawn();
+	}
+
+	public override function onCountdownStart(event:Dynamic):Void {
+		trySpawn();
+	}
+
+	public override function onSongEnd(event:Dynamic):Void {
+		incoming = [];
+		clearLanes();
+		releaseKeys();
+		write(false, 0, 0);
+	}
+
+	public override function onDestroy(event:Dynamic):Void {
+		incoming = [];
+		clearLanes();
+		releaseKeys();
+		write(false, 0, 0);
+	}
+
+	public override function onNoteIncoming(event:Dynamic):Void {
+		try {
+			var note = event.note;
+			if (note == null)
+				return;
+			if (!playerOwns(note))
+				return;
+			incoming.push(note);
+			if (incoming.length > 96)
+				incoming.splice(0, 1);
+		} catch (e:Dynamic) {}
+	}
+
+	public override function onUpdate(event:Dynamic):Void {
+		var dt:Float = 0.016;
+		try {
+			if (event != null && event.elapsed > 0 && event.elapsed < 1)
+				dt = event.elapsed;
+		} catch (e:Dynamic) {}
+		clock = clock + dt;
+		pressClock = pressClock + dt;
+		spawnClock = spawnClock + dt;
+
+		if (pressClock >= 0.016) {
+			pressClock = 0;
+			readPress();
+		}
+
+		var line = playerLine();
+		var pos:Float = songPos();
+		if (line == null) {
+			if (clock < IDLE_TICK)
+				return;
+			clock = 0;
+			incoming = [];
+			clearLanes();
+			releaseKeys();
+			write(false, 0, 0);
+			return;
+		}
+
+		if (!brainAlive && !spawned)
+			trySpawn();
+
+		scan(line, pos);
+		var arm = 0;
+		while (arm < 4) {
+			if (brainAlive && bits[arm] && due[arm] && !wasBits[arm]) {
+				wanted[arm] = true;
+				wantedAt[arm] = pos;
+			}
+			wasBits[arm] = bits[arm];
+			arm = arm + 1;
+		}
+		if (brainAlive)
+			hitLine(line, pos);
+		var w = 0;
+		while (w < 4) {
+			if (wanted[w] && pos - wantedAt[w] > 90)
+				wanted[w] = false;
+			w = w + 1;
+		}
+		holdKeys(line, pos);
+
+		if (clock >= TICK) {
+			clock = 0;
+			try {
+				write(true, pos, comboCount());
+			} catch (e:Dynamic) {}
+		}
+	}
+
+	public override function onNoteHit(event:Dynamic):Void {
+		try {
+			if (event.note != null && event.note.isHoldNote)
+				return;
+			var judgement = event.judgement;
+			if (judgement == null)
+				return;
+			if (judgement == "perfect" && event.score == 0)
+				return;
+			rating = Std.string(judgement);
+		} catch (e:Dynamic) {}
+	}
+
+	public override function onNoteMiss(event:Dynamic):Void {
+		rating = "miss";
+	}
+
+	function playerLine():Dynamic {
+		try {
+			var state = PlayState.instance;
+			if (state == null)
+				return null;
+			try {
+				if (state.playerStrumline != null)
+					return state.playerStrumline;
+			} catch (e:Dynamic) {}
+			try {
+				if (state.playerStrumLine != null)
+					return state.playerStrumLine;
+			} catch (e:Dynamic) {}
+		} catch (e:Dynamic) {}
+		return null;
+	}
+
+	function songPos():Float {
+		try {
+			return Conductor.instance.songPosition;
+		} catch (e:Dynamic) {}
+		try {
+			if (FlxG.sound != null && FlxG.sound.music != null)
+				return FlxG.sound.music.time;
+		} catch (e:Dynamic) {}
+		return 0;
+	}
+
+	function comboCount():Int {
+		try {
+			return Std.int(Highscore.tallies.combo);
+		} catch (e:Dynamic) {}
+		return 0;
+	}
+
+	function clearLanes() {
+		var i = 0;
+		while (i < 4) {
+			etas[i] = null;
+			due[i] = false;
+			sustain[i] = false;
+			i = i + 1;
+		}
+	}
+
+	function noteTime(note:Dynamic):Float {
+		try {
+			var data = note.noteData;
+			if (data != null)
+				return data.time;
+		} catch (e:Dynamic) {}
+		try {
+			return note.strumTime;
+		} catch (e:Dynamic) {}
+		try {
+			return note.time;
+		} catch (e:Dynamic) {}
+		return 0;
+	}
+
+	function noteLane(note:Dynamic):Int {
+		var n = laneFromAnim(note);
+		if (n >= 0)
+			return n;
+		n = laneFromStrumX(note);
+		if (n >= 0)
+			return n;
+		n = laneFromData(note);
+		if (n >= 0)
+			return n;
+		try {
+			n = laneFromAny(note.direction);
+			if (n >= 0)
+				return n;
+		} catch (e:Dynamic) {}
+		try {
+			n = laneFromAny(note.noteDirection);
+			if (n >= 0)
+				return n;
+		} catch (e:Dynamic) {}
+		return -1;
+	}
+
+	function laneFromAnim(note:Dynamic):Int {
+		var a = "";
+		try {
+			a = Std.string(note.animation.name);
+		} catch (e:Dynamic) {}
+		if (a == "" || a == "null") {
+			try {
+				a = Std.string(note.animation.curAnim.name);
+			} catch (e:Dynamic) {}
+		}
+		a = a.toLowerCase();
+		if (a.indexOf("purple") >= 0)
+			return 0;
+		if (a.indexOf("blue") >= 0)
+			return 1;
+		if (a.indexOf("green") >= 0)
+			return 2;
+		if (a.indexOf("red") >= 0)
+			return 3;
+		if (a.indexOf("left") >= 0)
+			return 0;
+		if (a.indexOf("down") >= 0)
+			return 1;
+		if (a.indexOf("right") >= 0)
+			return 3;
+		if (a.indexOf("up") >= 0)
+			return 2;
+		return -1;
+	}
+
+	function laneFromStrumX(note:Dynamic):Int {
+		var line = playerLine();
+		if (line == null || note == null)
+			return -1;
+		var nx = 0.0;
+		try {
+			nx = note.x;
+		} catch (e:Dynamic) {
+			return -1;
+		}
+		var recs = null;
+		try {
+			recs = line.strumlineNotes.members;
+		} catch (e:Dynamic) {}
+		var best = -1;
+		var bestD = 99999.0;
+		var i = 0;
+		while (i < 4) {
+			var rx = 0.0;
+			var ok = false;
+			try {
+				if (recs != null && recs[i] != null) {
+					rx = recs[i].x;
+					ok = true;
+				}
+			} catch (e:Dynamic) {}
+			if (!ok) {
+				try {
+					var rec = line.getByIndex(i);
+					if (rec != null) {
+						rx = rec.x;
+						ok = true;
+					}
+				} catch (e:Dynamic) {}
+			}
+			if (ok) {
+				var d = nx - rx;
+				if (d < 0)
+					d = -d;
+				if (d < bestD) {
+					bestD = d;
+					best = i;
+				}
+			}
+			i = i + 1;
+		}
+		if (best >= 0 && bestD < 160)
+			return best;
+		return -1;
+	}
+
+	function laneFromData(note:Dynamic):Int {
+		try {
+			var s = Std.string(note.noteData.data);
+			var p = Std.parseInt(s);
+			if (p != null) {
+				p = p % 4;
+				if (p < 0)
+					p = p + 4;
+				if (p >= 0 && p <= 3)
+					return p;
+			}
+		} catch (e:Dynamic) {}
+		try {
+			return laneFromAny(note.noteData.getDirection());
+		} catch (e:Dynamic) {}
+		try {
+			return laneFromAny(note.noteData.getDirectionName());
+		} catch (e:Dynamic) {}
+		return -1;
+	}
+
+	function laneFromAny(raw:Dynamic):Int {
+		if (raw == null)
+			return -1;
+		var s = Std.string(raw).toLowerCase();
+		if (s.indexOf("right") >= 0 || s == "3" || s == "3.0")
+			return 3;
+		if (s.indexOf("left") >= 0 || s == "0" || s == "0.0")
+			return 0;
+		if (s.indexOf("down") >= 0 || s == "1" || s == "1.0")
+			return 1;
+		if (s == "up" || s == "2" || s == "2.0" || s.indexOf("note_up") >= 0 || s.indexOf("(2)") >= 0)
+			return 2;
+		if (s.indexOf("up") >= 0)
+			return 2;
+		try {
+			var p = Std.parseInt(s);
+			if (p != null) {
+				p = p % 4;
+				if (p < 0)
+					p = p + 4;
+				return p;
+			}
+		} catch (e:Dynamic) {}
+		return -1;
+	}
+
+	function playerOwns(note:Dynamic):Bool {
+		var line = playerLine();
+		if (line == null || note == null)
+			return false;
+		try {
+			var opp = PlayState.instance.opponentStrumline;
+			if (opp != null && opp != line && listHas(opp.notes.members, note))
+				return false;
+		} catch (e:Dynamic) {}
+		try {
+			if (listHas(line.notes.members, note))
+				return true;
+		} catch (e:Dynamic) {}
+		if (listHas(groupMembers(line), note))
+			return true;
+		try {
+			if (listHas(line.getNotesOnScreen(), note))
+				return true;
+		} catch (e:Dynamic) {}
+		return false;
+	}
+
+	function groupMembers(line:Dynamic):Array<Dynamic> {
+		var out:Array<Dynamic> = [];
+		try {
+			pushAll(out, line.getNotesOnScreen());
+		} catch (e:Dynamic) {}
+		try {
+			pushAll(out, line.getNotesMayHit());
+		} catch (e:Dynamic) {}
+		try {
+			pushAll(out, line.notes.members);
+		} catch (e:Dynamic) {}
+		return out;
+	}
+
+	function pushAll(dest:Array<Dynamic>, src:Dynamic) {
+		if (src == null)
+			return;
+		var n = 0;
+		try {
+			n = src.length;
+		} catch (e:Dynamic) {
+			return;
+		}
+		var i = 0;
+		while (i < n) {
+			var v = src[i];
+			i = i + 1;
+			if (v != null)
+				dest.push(v);
+		}
+	}
+
+	function listHas(src:Array<Dynamic>, note:Dynamic):Bool {
+		var i = 0;
+		while (i < src.length) {
+			if (src[i] == note)
+				return true;
+			i = i + 1;
+		}
+		return false;
+	}
+
+	function pruneIncoming() {
+		var next:Array<Dynamic> = [];
+		var i = 0;
+		while (i < incoming.length) {
+			var note = incoming[i];
+			i = i + 1;
+			if (note == null)
+				continue;
+			var keep = true;
+			try {
+				if (note.alive == false || note.hasBeenHit == true || note.hasMissed == true)
+					keep = false;
+			} catch (e:Dynamic) {}
+			if (keep)
+				next.push(note);
+		}
+		incoming = next;
+	}
+
+	function scan(line:Dynamic, pos:Float) {
+		clearLanes();
+		pruneIncoming();
+		var notes:Array<Dynamic> = groupMembers(line);
+		pushAll(notes, incoming);
+		var i = 0;
+		while (i < notes.length) {
+			var note = notes[i];
+			i = i + 1;
+			if (note == null)
+				continue;
+			var alive = true;
+			var hit = false;
+			var missed = false;
+			try {
+				alive = note.alive != false;
+				hit = note.hasBeenHit == true;
+				missed = note.hasMissed == true;
+			} catch (e:Dynamic) {
+				continue;
+			}
+			if (!alive || hit || missed)
+				continue;
+			if (!playerOwns(note))
+				continue;
+			if (skipNote(note))
+				continue;
+			var lane = noteLane(note);
+			if (lane < 0 || lane > 3)
+				continue;
+			var t = noteTime(note);
+			var diff = t - pos;
+			if (diff > 520 || diff < -120)
+				continue;
+			if (etas[lane] == null || Math.abs(diff) < Math.abs(etas[lane] * 1000))
+				etas[lane] = diff * 0.001;
+			if (diff <= 55 && diff >= -28)
+				due[lane] = true;
+			var len = noteLength(note);
+			if (len > 1 && pos >= t - 32 && pos <= t + len + 48)
+				sustain[lane] = true;
+		}
+		scanHolds(line, pos);
+	}
+
+	function scanHolds(line:Dynamic, pos:Float) {
+		var holds = null;
+		try {
+			holds = line.holdNotes.members;
+		} catch (e:Dynamic) {}
+		if (holds == null)
+			return;
+		var hc = 0;
+		try {
+			hc = holds.length;
+		} catch (e:Dynamic) {}
+		var h = 0;
+		while (h < hc) {
+			var hold = holds[h];
+			h = h + 1;
+			if (hold == null)
+				continue;
+			var alive = true;
+			try {
+				alive = hold.alive != false;
+			} catch (e:Dynamic) {}
+			if (!alive)
+				continue;
+			try {
+				if (hold.missedNote == true)
+					continue;
+			} catch (e:Dynamic) {}
+			var lane = -1;
+			var start = 0.0;
+			var len = 0.0;
+			try {
+				lane = noteLane(hold);
+				if (lane < 0)
+					lane = Std.int(hold.noteDirection);
+				start = hold.strumTime;
+				len = hold.fullSustainLength;
+			} catch (e:Dynamic) {
+				continue;
+			}
+			if (lane < 0 || lane > 3 || len < 1)
+				continue;
+			if (pos >= start - 32 && pos <= start + len + 40)
+				sustain[lane] = true;
+		}
+	}
+
+	function hitLine(line:Dynamic, pos:Float) {
+		var notes:Array<Dynamic> = [];
+		try {
+			pushAll(notes, line.getNotesMayHit());
+		} catch (e:Dynamic) {}
+		if (notes.length == 0)
+			pushAll(notes, groupMembers(line));
+		pushAll(notes, incoming);
+		var best:Array<Dynamic> = [null, null, null, null];
+		var bestAbs:Array<Float> = [9999, 9999, 9999, 9999];
+		var i = 0;
+		while (i < notes.length) {
+			var note = notes[i];
+			i = i + 1;
+			if (note == null)
+				continue;
+			var alive = true;
+			var hit = false;
+			var missed = false;
+			try {
+				alive = note.alive != false;
+				hit = note.hasBeenHit == true;
+				missed = note.hasMissed == true;
+			} catch (e:Dynamic) {
+				continue;
+			}
+			if (!alive || hit || missed)
+				continue;
+			if (!playerOwns(note))
+				continue;
+			if (skipNote(note))
+				continue;
+			var lane = noteLane(note);
+			if (lane < 0 || lane > 3)
+				continue;
+			if (!wanted[lane])
+				continue;
+			var t = noteTime(note);
+			if (Math.abs(t - lastHitT[lane]) < 24)
+				continue;
+			var diff = t - pos;
+			if (diff > 38 || diff < -30)
+				continue;
+			var ad = Math.abs(diff);
+			if (ad < bestAbs[lane]) {
+				bestAbs[lane] = ad;
+				best[lane] = note;
+			}
+		}
+		i = 0;
+		while (i < 4) {
+			if (best[i] != null)
+				strike(line, best[i], i, pos, noteTime(best[i]));
+			i = i + 1;
+		}
+	}
+
+	function strike(line:Dynamic, note:Dynamic, lane:Int, pos:Float, t:Float) {
+		if (!playerOwns(note))
+			return;
+		try {
+			if (note.hasBeenHit == true || note.hasMissed == true)
+				return;
+		} catch (e:Dynamic) {}
+		if (Math.abs(t - lastHitT[lane]) < 24)
+			return;
+		lastHitT[lane] = t;
+		wanted[lane] = false;
+		var holdSpr = null;
+		try {
+			holdSpr = note.holdNoteSprite;
+		} catch (e:Dynamic) {}
+		var len = noteLength(note);
+		if (len > 1) {
+			holdUntil[lane] = t + len + 30;
+			if (!prev[lane]) {
+				try {
+					line.pressKey(lane, 9000 + lane);
+				} catch (e:Dynamic) {}
+				prev[lane] = true;
+			}
+		}
+		try {
+			line.hitNote(note);
+		} catch (e:Dynamic) {}
+		try {
+			line.getByIndex(lane).playConfirm();
+		} catch (e:Dynamic) {}
+		try {
+			line.playConfirm(lane);
+		} catch (e:Dynamic) {}
+		if (holdSpr != null && len > 1) {
+			try {
+				line.playNoteHoldCover(holdSpr);
+			} catch (e:Dynamic) {}
+		}
+		var a = Math.abs(pos - t);
+		var name = "sick";
+		var score = 350.0;
+		var health = 0.023;
+		var brk = false;
+		if (a > 45) {
+			name = "good";
+			score = 200;
+			health = 0.004;
+		}
+		if (a > 90) {
+			name = "bad";
+			score = 100;
+			health = 0;
+		}
+		if (a > 135) {
+			name = "shit";
+			score = 50;
+			health = -0.01;
+		}
+		try {
+			PlayState.instance.applyScore(score, name, health, brk);
+		} catch (e:Dynamic) {}
+		try {
+			PlayState.instance.popUpScore(name);
+		} catch (e:Dynamic) {}
+		try {
+			Highscore.tallies.totalNotesHit++;
+		} catch (e:Dynamic) {}
+		if (name == "sick") {
+			try {
+				line.getByIndex(lane).playNoteSplash();
+			} catch (e:Dynamic) {}
+			try {
+				line.playNoteSplash(lane);
+			} catch (e:Dynamic) {}
+		}
+		try {
+			var bf = PlayState.instance.currentStage.getBoyfriend();
+			if (bf != null)
+				bf.playSingAnimation(lane);
+		} catch (e:Dynamic) {}
+		if (rating == "")
+			rating = name;
+	}
+
+	function holdKeys(line:Dynamic, pos:Float) {
+		var i = 0;
+		while (i < 4) {
+			if (holdUntil[i] > 0 && pos > holdUntil[i])
+				holdUntil[i] = 0;
+			var next = brainAlive && holdUntil[i] > pos;
+			if (next && !prev[i]) {
+				try {
+					line.pressKey(i, 9000 + i);
+				} catch (e:Dynamic) {}
+			} else if (!next && prev[i]) {
+				try {
+					line.releaseKey(i);
+				} catch (e:Dynamic) {}
+			}
+			prev[i] = next;
+			i = i + 1;
+		}
+	}
+
+	function releaseKeys() {
+		var line = playerLine();
+		var i = 0;
+		while (i < 4) {
+			if (prev[i] && line != null) {
+				try {
+					line.releaseKey(i);
+				} catch (e:Dynamic) {}
+			}
+			prev[i] = false;
+			bits[i] = false;
+			wasBits[i] = false;
+			wanted[i] = false;
+			wantedAt[i] = -9999;
+			lastHitT[i] = -9999;
+			holdUntil[i] = 0;
+			i = i + 1;
+		}
+	}
+
+	function write(song:Bool, pos:Float, combo:Int) {
+		seq = seq + 1;
+		var text = "v=1 song=" + (song ? "1" : "0") + " t=" + pos + " combo=" + combo + " seq=" + seq + " keys=0 layout=wasd_arrows\n";
+		text = text + "e=" + num(etas[0]) + "," + num(etas[1]) + "," + num(etas[2]) + "," + num(etas[3]) + "\n";
+		text = text + "s=" + bit(sustain[0]) + "," + bit(sustain[1]) + "," + bit(sustain[2]) + "," + bit(sustain[3]) + "\n";
+		text = text + "d=" + bit(due[0]) + "," + bit(due[1]) + "," + bit(due[2]) + "," + bit(due[3]) + "\n";
+		if (rating != "") {
+			text = text + "r=" + rating + "\n";
+			rating = "";
+		}
+		putAbs(tmpSense, text);
+		putAbs(funkSense, text);
+		putRel(localSense, text);
+	}
+
+	function readPress() {
+		var text = getAbs(tmpPress);
+		if (text == null || text.length < 3)
+			text = getAbs(funkPress);
+		if (text == null || text.length < 3)
+			text = getRel(localPress);
+		if (text == null || text.length < 3)
+			return;
+		if (text == lastPress)
+			return;
+		lastPress = text;
+		var live = false;
+		var quit = false;
+		var next = [false, false, false, false];
+		var parts = text.split(" ");
+		var i = 0;
+		while (i < parts.length) {
+			var part = parts[i];
+			i = i + 1;
+			if (part.indexOf("alive=") == 0)
+				live = part.substr(6) != "0";
+			else if (part.indexOf("quit=") == 0)
+				quit = part.substr(5) != "0";
+			else if (part.indexOf("m=") == 0) {
+				var m = part.substr(2).split(",");
+				var k = 0;
+				while (k < 4 && k < m.length) {
+					var tok = m[k];
+					next[k] = tok != null && tok.charAt(0) == "1";
+					k = k + 1;
+				}
+			}
+		}
+		if (quit) {
+			brainAlive = false;
+			releaseKeys();
+			return;
+		}
+		brainAlive = live;
+		if (live) {
+			bits[0] = next[0];
+			bits[1] = next[1];
+			bits[2] = next[2];
+			bits[3] = next[3];
+		} else {
+			bits[0] = false;
+			bits[1] = false;
+			bits[2] = false;
+			bits[3] = false;
+			wasBits[0] = false;
+			wasBits[1] = false;
+			wasBits[2] = false;
+			wasBits[3] = false;
+		}
+	}
+
+	function trySpawn() {
+		if (brainAlive || spawned)
+			return;
+		if (spawnClock < SPAWN_GAP)
+			return;
+		spawnClock = 0;
+		spawned = true;
+		var path = null;
+		var names = ["mods/fruit-fly/python/fly_brain.bat", "./mods/fruit-fly/python/fly_brain.bat", "mods/fruit-fly/START FLY BRAIN.bat"];
+		var i = 0;
+		while (i < names.length) {
+			var ok = false;
+			try {
+				ok = sys.FileSystem.exists(names[i]);
+			} catch (e:Dynamic) {}
+			if (!ok) {
+				try {
+					ok = FileUtil.pathExists(names[i]);
+				} catch (e:Dynamic) {}
+			}
+			if (ok) {
+				path = names[i];
+				break;
+			}
+			i = i + 1;
+		}
+		if (path == null)
+			return;
+		var abs = path;
+		try {
+			var cwd = Sys.getCwd();
+			if (cwd != null && path.indexOf(":") < 0) {
+				var last = cwd.substr(cwd.length - 1);
+				if (last != "/" && last != "\\")
+					cwd = cwd + "/";
+				abs = cwd + path;
+			}
+			abs = abs.split("/").join("\\");
+		} catch (e:Dynamic) {}
+		try {
+			new sys.io.Process("cmd.exe", ["/c", "start", "FlyBrainWin", "/b", abs]);
+		} catch (e:Dynamic) {}
+	}
+
+	function getAbs(path:String):String {
+		if (path == null || path == "")
+			return null;
+		try {
+			return sys.io.File.getContent(path);
+		} catch (e:Dynamic) {}
+		return null;
+	}
+
+	function getRel(path:String):String {
+		if (path == null || path == "")
+			return null;
+		try {
+			return sys.io.File.getContent(path);
+		} catch (e:Dynamic) {}
+		try {
+			return FileUtil.readStringFromPath(path);
+		} catch (e:Dynamic) {}
+		return null;
+	}
+
+	function putAbs(path:String, text:String) {
+		if (path == null || path == "")
+			return;
+		try {
+			sys.io.File.saveContent(path, text);
+		} catch (e:Dynamic) {}
+	}
+
+	function putRel(path:String, text:String) {
+		if (path == null || path == "")
+			return;
+		try {
+			sys.io.File.saveContent(path, text);
+			return;
+		} catch (e:Dynamic) {}
+		try {
+			FileUtil.deleteFile(path);
+		} catch (e:Dynamic) {}
+		try {
+			FileUtil.writeStringToPath(path, text);
+		} catch (e:Dynamic) {}
+	}
+
+	function num(v:Dynamic):String {
+		if (v == null)
+			return "";
+		return Std.string(v);
+	}
+
+	function bit(v:Dynamic):String {
+		return v == true ? "1" : "0";
+	}
+
+	function badType(raw:Dynamic):Bool {
+		if (raw == null)
+			return false;
+		var t = Std.string(raw).toLowerCase();
+		if (t == "" || t == "null" || t == "normal" || t == "default" || t == "none")
+			return false;
+		return t.indexOf("hurt") >= 0 || t.indexOf("mine") >= 0 || t.indexOf("kill") >= 0 || t.indexOf("death") >= 0 || t.indexOf("fake") >= 0 || t.indexOf("bomb") >= 0;
+	}
+
+	function noteLength(note:Dynamic):Float {
+		try {
+			var data = note.noteData;
+			if (data != null && data.length > 0)
+				return data.length;
+		} catch (e:Dynamic) {}
+		try {
+			if (note.length > 0)
+				return note.length;
+		} catch (e:Dynamic) {}
+		try {
+			if (note.holdNoteSprite != null && note.holdNoteSprite.fullSustainLength > 0)
+				return note.holdNoteSprite.fullSustainLength;
+		} catch (e:Dynamic) {}
+		return 0;
+	}
+
+	function skipNote(note:Dynamic):Bool {
+		if (note == null)
+			return true;
+		try {
+			if (note.hurtNote == true || note.hitCausesMiss == true)
+				return true;
+		} catch (e:Dynamic) {}
+		try {
+			if (badType(note.noteType) || badType(note.kind))
+				return true;
+		} catch (e:Dynamic) {}
+		return false;
+	}
+}
